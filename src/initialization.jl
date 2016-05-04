@@ -4,8 +4,8 @@
 # adding header search directories is done in this file.
 
 # Paths
-basepath = joinpath(JULIA_HOME, "../../")
-depspath = joinpath(basepath, "deps")
+basepath = joinpath(BASE_JULIA_HOME, "../../")
+depspath = joinpath(basepath, "deps", "srccache")
 
 # Load the Cxx.jl bootstrap library (in debug version if we're running the Julia
 # debug version)
@@ -21,9 +21,13 @@ function init_libcxxffi()
 end
 init_libcxxffi()
 
-function setup_instance()
+function setup_instance(UsePCH = C_NULL)
     x = Array(ClangCompiler,1)
-    ccall((:init_clang_instance,libcxxffi),Void,(Ptr{Void},Ptr{UInt8}),x,C_NULL)
+    sysroot = @osx? strip(readstring(`xcodebuild -version -sdk macosx Path`)) : C_NULL
+    EmitPCH = true
+    ccall((:init_clang_instance,libcxxffi),Void,
+        (Ptr{Void},Ptr{UInt8},Ptr{UInt8},Bool,Ptr{UInt8},Ptr{Void}),
+        x,C_NULL,sysroot,EmitPCH,UsePCH,julia_to_llvm(Any))
     x[1]
 end
 
@@ -42,7 +46,7 @@ CollectGlobalConstructors(C) = pcpp"llvm::Function"(
     ccall((:CollectGlobalConstructors,libcxxffi),Ptr{Void},(Ptr{ClangCompiler},),&C))
 
 function RunGlobalConstructors(C)
-    p = CollectGlobalConstructors(C).ptr
+    p = convert(Ptr{Void}, CollectGlobalConstructors(C))
     # If p is NULL it means we have no constructors to run
     if p != C_NULL
         eval(:(llvmcall($p,Void,Tuple{})))
@@ -194,11 +198,11 @@ function ScanLibDirForGCCTriple(base,triple)
         # Skip cross compilers
         # "gcc-cross"
         ("/" * triple * "/gcc/" * triple, "/../../../.."),
-        ("/" * triple, "/../..")
+        ("/" * triple, "/../.."),
         # Don't try to find ubuntu weirdness
         # hopefully recent enough versions don't
         # have this mismatch
-        # "/i386-linux-gnu/gcc/" * triple
+        ("/i386-linux-gnu/gcc/" * triple, "/../../../..")
     ]
     Version = v"0.0.0"
     VersionString = ""
@@ -207,6 +211,7 @@ function ScanLibDirForGCCTriple(base,triple)
         path = base * suffix
         isdir(path) || continue
         for dir in readdir(path)
+            isdir(joinpath(path, dir)) || continue
             CandidateVersion = try
                 VersionNumber(dir)
             catch
@@ -219,11 +224,11 @@ function ScanLibDirForGCCTriple(base,triple)
             end
             InstallPath = path * "/" * dir
             IncPath = InstallPath * isuffix * "/../include"
-            if
-               ( !isdir( IncPath * "/" * triple * "/c++/" * dir ) ||
+            if ( !isdir( IncPath * "/" * triple * "/c++/" * dir ) ||
                   !isdir( IncPath * "/c++/" * dir ) )  &&
                ( !isdir( IncPath * "/c++/" * dir * "/" * triple ) ||
-                  !isdir( IncPath * "/c++/" * dir ) )
+                  !isdir( IncPath * "/c++/" * dir ) )  &&
+               (triple != "i686-linux-gnu" || !isdir( IncPath * "/i386-linux-gnu/c++/" * dir ))
                 continue
             end
             Version = CandidateVersion
@@ -245,15 +250,26 @@ function AddLinuxHeaderPaths(C)
     "x86_64-linux-android", "x86_64-unknown-linux"
     ]
 
-    const Prefixes = ["/usr"]
+    const X86LibDirs = ["/lib32", "/lib"]
+    const X86Triples = ["i686-linux-gnu",       "i686-pc-linux-gnu",     "i486-linux-gnu",
+                        "i386-linux-gnu",       "i386-redhat-linux6E",   "i686-redhat-linux",
+                        "i586-redhat-linux",    "i386-redhat-linux",     "i586-suse-linux",
+                        "i486-slackware-linux", "i686-montavista-linux", "i686-linux-android",
+                        "i586-linux-gnu"]
 
+
+    CXXJL_ROOTDIR = get(ENV, "CXXJL_ROOTDIR", "") * "/usr"
+    const Prefixes = [ CXXJL_ROOTDIR ]
+
+    LibDirs = (Int === Int64 ? X86_64LibDirs : X86LibDirs)
+    Triples = (Int === Int64 ? X86_64Triples : X86Triples)
     Version = v"0.0.0"
     Path = VersionString = Triple = ""
     for prefix in Prefixes
         isdir(prefix) || continue
-        for dir in X86_64LibDirs
-            isdir(prefix) || continue
-            for triple in X86_64Triples
+        for dir in LibDirs
+            isdir(prefix*dir) || continue
+            for triple in Triples
                 CandidateVersion, CandidateVersionString, CandidatePath =
                     ScanLibDirForGCCTriple(prefix*dir,triple)
                 if CandidateVersion > Version
@@ -274,12 +290,14 @@ function AddLinuxHeaderPaths(C)
 
     incpath = Path * "/../include"
 
-    incpath = Path * "/../include"
-
     addHeaderDir(C, incpath, kind = C_System)
     addHeaderDir(C, incpath * "/c++/" * VersionString, kind = C_System)
+    addHeaderDir(C, incpath * "/c++/" * VersionString * "/backward", kind = C_System)
 
     # check which type of include dir we have
+    if Triple == "i686-linux-gnu" && !isdir(incpath * "/" * Triple)
+        Triple = "i386-linux-gnu"
+    end
     if isdir(incpath * "/" * Triple)
        addHeaderDir(C, incpath * "/" * Triple * "/c++/" * VersionString, kind = C_System)
        addHeaderDir(C, incpath * "/" * Triple, kind = C_System)
@@ -303,21 +321,24 @@ end
 
 function addClangHeaders(C)
     # Also add clang's intrinsic headers
-    addHeaderDir(C,joinpath(JULIA_HOME,"../lib/clang/3.8.0/include/"), kind = C_ExternCSystem)
+    addHeaderDir(C,joinpath(BASE_JULIA_HOME,"../lib/clang/$(replace(Base.libllvm_version,"svn",""))/include/"), kind = C_ExternCSystem)
 end
 
-function initialize_instance!(C)
+function initialize_instance!(C; register_boot = true)
     if !nostdcxx
         addStdHeaders(C)
     end
     addClangHeaders(C)
-    cxxinclude(C,Pkg.dir("Cxx","src","boot.h"))
-    RegisterType(C,lookup_name(C,["jl_value_t"]),getPointerElementType(julia_to_llvm(Any)))
+    register_boot && register_booth(C)
+end
+
+function register_booth(C)
+    C = Cxx.instance(C)
+    cxxinclude(C,joinpath(dirname(@__FILE__),"boot.h"))
 end
 
 # As an optimzation, create a generic function per compiler instance,
 # to avoid having to create closures at the call site
-
 function __init__()
     init_libcxxffi()
     C = setup_instance()
@@ -325,12 +346,12 @@ function __init__()
     push!(active_instances, C)
     # Setup exception translation callback
     callback = cglobal((:process_cxx_exception,libcxxffi),Ptr{Void})
-    unsafe_store!(callback, cfunction(process_cxx_exception,Void,Tuple{UInt64,Ptr{Void}}))
+    unsafe_store!(callback, cfunction(process_cxx_exception,Union{},Tuple{UInt64,Ptr{Void}}))
 end
 
-function new_clang_instance()
+function new_clang_instance(register_boot = true)
     C = setup_instance()
-    initialize_instance!(C)
+    initialize_instance!(C; register_boot = register_boot)
     push!(active_instances, C)
     CxxInstance{length(active_instances)}()
 end

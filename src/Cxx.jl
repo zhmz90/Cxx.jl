@@ -137,15 +137,18 @@
 # Function (in some cases we need to return some extra code, but those cases
 # are discussed below)
 #
-
+__precompile__(false)
 module Cxx
+pathfile = joinpath(dirname(@__FILE__),"../deps/path.jl")
+isfile(pathfile) || error("path.jl not generated. Try running Pkg.build(\"Cxx\")")
+include(pathfile)
 
 using Base.Meta
 using Base: svec
 
 export cast,
        @cxx_str, @cxx_mstr, @icxx_str, @icxx_mstr, @cxxt_str,
-       @cxx, @cxxnew, @jpcpp_str, @exception,
+       @cxx, @cxxnew, @jpcpp_str, @exception, @cxxm,
        addHeaderDir, defineMacro, cxxinclude, cxxparse, new_clang_instance,
        C_User, C_System, C_ExternCSystem
 
@@ -163,15 +166,21 @@ include("autowrap.jl")
 
 end
 
+# In precompilation mode, we do still need clang, so do it manually
+if ccall(:jl_generating_output, Cint, ()) != 0
+    Cxx.__init__()
+end
+
 # C++ standard library helpers
 module CxxStd
 
     using Cxx
+    include("show.jl")
     include("std.jl")
 
 end
 
-include(Pkg.dir("Cxx","src","CxxREPL","replpane.jl"))
+include(joinpath(dirname(@__FILE__),"CxxREPL","replpane.jl"))
 if isdefined(Base, :active_repl)
    CxxREPL.RunCxxREPL(Cxx.__current_compiler__)
 end

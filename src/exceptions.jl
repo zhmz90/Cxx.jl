@@ -3,9 +3,9 @@ const libcxx_dependent_class     = 0x434C4E47432B2B01
 const get_vendor_and_language    = 0xFFFFFFFFFFFFFF00
 
 const libstdcxx_class =
-  bswap(reinterpret(UInt64,Uint8['G','N','U','C','C','+','+','\0'])[1])
+  bswap(reinterpret(UInt64,UInt8['G','N','U','C','C','+','+','\0'])[1])
 const libstdcxx_depdendent_class =
-  bswap(reinterpret(UInt64,Uint8['G','N','U','C','C','+','+','\x1'])[1])
+  bswap(reinterpret(UInt64,UInt8['G','N','U','C','C','+','+','\x1'])[1])
 
 immutable _UnwindException
     class::UInt64
@@ -44,25 +44,49 @@ function exceptionObject{T<:CppRef}(e::CxxException,::Type{T})
     T(convert(Ptr{Void},(e.exception+sizeof(LibCxxException))))
 end
 
+function show_cxx_backtrace(io::IO, t, set=1:typemax(Int))
+    show_cxx_backtrace(io,Base.eval_user_input.env.name,t, set)
+end
+
+function show_cxx_backtrace(io::IO, top_function::Symbol, t, set)
+    local process_entry
+    let saw_unwind_resume = false
+        function process_entry(lastname, lastfile, lastline, last_inlinedat_file, last_inlinedat_line, n)
+            if lastname == :_Unwind_Resume
+                saw_unwind_resume = true
+                return
+            end
+            saw_unwind_resume || return
+            lastname == Symbol("???") && return
+            Base.show_trace_entry(io, lastname, lastfile, lastline, last_inlinedat_file, last_inlinedat_line, n)
+        end
+    end
+    Base.process_backtrace(process_entry, top_function, t, set; skipC = false)
+end
+
 import Base: showerror
-function showerror(io::IO, e::CxxException)
-    print(io,"Unrecognized C++ Exception")
+function showerror{kind}(io::IO, e::CxxException{kind})
+    print(io,"Unrecognized C++ Exception ($kind)")
+end
+function showerror{kind}(io::IO, e::CxxException{kind}, bt)
+    showerror(io, e)
+    show_cxx_backtrace(io, bt)
 end
 
 function process_cxx_exception(code::UInt64, e::Ptr{Void})
     e = Ptr{_UnwindException}(e)
     if (code & get_vendor_and_language) == libcxx_class
         # This is a libc++ exception
-        offset = Base.field_offset(LibCxxException,length(LibCxxException.types)-1)
+        offset = Base.fieldoffset(LibCxxException,length(LibCxxException.types))
         cxxe = Ptr{LibCxxException}(e - offset)
         T = unsafe_load(cxxe).exceptionType
-        throw(CxxException{symbol(bytestring(icxx"$T->name();"))}(cxxe))
+        throw(CxxException{Symbol(bytestring(icxx"$T->name();"))}(cxxe))
     elseif (code & get_vendor_and_language) == libstdcxx_class
-      # This is a libstdc++ exception
-      offset = Base.field_offset(LibStdCxxException,length(LibStdCxxException.types)-1)
-      cxxe = Ptr{LibStdCxxException}(e - offset)
-      T = unsafe_load(cxxe).exceptionType
-      throw(CxxException{symbol(bytestring(icxx"$T->name();"))}(cxxe))
+        # This is a libstdc++ exception
+        offset = Base.fieldoffset(LibStdCxxException,length(LibStdCxxException.types))
+        cxxe = Ptr{LibStdCxxException}(e - offset)
+        T = unsafe_load(cxxe).exceptionType
+        throw(CxxException{Symbol(bytestring(icxx"$T->name();"))}(cxxe))
     end
     error("Caught a C++ exception")
 end
@@ -77,7 +101,7 @@ end
     if isReferenceType(T)
         T = getPointeeType(T)
     end
-    s = symbol(getTypeName(C, T))
+    s = Symbol(getTypeName(C, T))
     quot(s)
 end
 

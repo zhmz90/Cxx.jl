@@ -10,7 +10,7 @@ extern "C" {
 """
 @cxx foo37()
 
-# Constnes in template arguments - issue #33
+# Constness in template arguments - issue #33
 cxx"""
 #include <map>
 #include <string>
@@ -171,13 +171,13 @@ cxx""" enum { kFalse118 = 0, kTrue118 = 1 }; """
 cxx""" void foo119(char value) {} """
 @cxx foo119(UInt8(0))
 
+# UInt16 builtin (#119)
+cxx""" void foo119b(unsigned short value) {} """
+@cxx foo119b(UInt16(0))
+
 # Enums should be comparable with integers
 cxx""" enum myCoolEnum { OneValue = 1 }; """
 @assert icxx" OneValue; " == 1
-
-# Converting julia data
-buf = IOBuffer()
-@assert pointer_from_objref(buf) == icxx"""(void*)$(jpcpp"jl_value_t"(buf));"""
 
 # Exception handling
 try
@@ -230,3 +230,174 @@ finalize(X)
 foo{T}(x::cxxt"std::vector<$T>") = icxx"$x.size();"
 @test foo(icxx"std::vector<uint64_t>{0};") == 1
 @test foo(icxx"std::vector<uint64_t>{};") == 0
+
+
+# #141
+@assert icxx"""
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winvalid-offsetof"
+bool ok =(size_t)(&((clang::LangOptions*)0)->CurrentModule) == offsetof(clang::LangOptions,CurrentModule);
+#pragma clang diagnostic pop
+return ok;
+"""
+
+# #163
+cxx"""
+struct bar163 {
+    int x;
+};
+"""
+Base.convert(::Type{cxxt"bar163"},x::Int) = icxx"bar163{.x = 1};"
+foo163() = convert(cxxt"bar163",1)
+foo163(); foo163();
+
+makeVector(T) = cxxt"std::vector<$T>"
+
+@assert makeVector(UInt64) === cxxt"std::vector<uint64_t>"
+
+# #169
+cxx""" void inp169(int &x){ x += 1; };  """
+x169 = Ref{Cint}(666)
+icxx"inp169($x169);"
+@assert x169[] == 667
+
+# Implement C++ Functions in julia
+
+@cxxm "int foofunc(int x)" begin
+    x+1
+end
+@test icxx"foofunc(5);" == 6
+
+cxx"""
+struct foostruct {
+    int x;
+    int y;
+    int Add1();
+    struct foostruct Add(struct foostruct other);
+    void *ReturnAPtr();
+};
+"""
+@cxxm "int foostruct::Add1()" begin
+    icxx"return $this->x;"+1
+end
+
+@test icxx"foostruct{1,0}.Add1();" == 2
+
+
+@cxxm "struct foostruct foostruct::Add(struct foostruct other)" begin
+    icxx"return foostruct{$this->x+$other.x,$this->y+$other.y};"
+end
+
+@test icxx"foostruct{1,2}.Add(foostruct{2,3}).Add1();" == 4
+
+@cxxm "void *foostruct::ReturnAPtr()" begin
+    reinterpret(Ptr{Void},0xdeadbeef%UInt)
+end
+
+@test icxx"foostruct{1,2}.ReturnAPtr();" == reinterpret(Ptr{Void},0xdeadbeef%UInt)
+
+
+# Issue #95
+@test icxx"""
+    std::string{$("foo bar")} == "foo bar";
+"""
+
+# Negative and very large integer template parameters
+cxx"""template <uint64_t T>
+class testLargeValue
+{
+    public:
+        testLargeValue(){}
+        uint64_t getT();
+};"""
+
+cxx"""template <uint64_t T>
+uint64_t testLargeValue<T>::getT()
+{
+    return T;
+};"""
+
+cxx"""template <int T>
+class testNegativeValue
+{
+    public:
+        testNegativeValue(){}
+        int getT();
+};"""
+
+cxx"""template <int T>
+int testNegativeValue<T>::getT()
+{
+    return T;
+};"""
+
+tmp = icxx"testLargeValue<0xffffffffffffffff>();"
+@test icxx"$(tmp).getT();" == 0xffffffffffffffff
+
+tmp = icxx"testNegativeValue<-1>();"
+@test icxx"$(tmp).getT();" == -1
+
+# Broken Testcase while porting to jb/functions
+# The problematic case was both a Julia and a C++ side capture
+
+function fooTheLambda()
+    ret = Expr(:block)
+    f = (arg1,)->begin
+            @assert Cxx.lambdacall(Cxx.__default_compiler__,arg1) == 1
+            @assert pointer_from_objref(ret) != C_NULL
+            @assert ret.head == :block
+        end
+    icxx"""
+        int x = 1;
+        auto &f = $f;
+        f([&](){ return x; });
+        return;
+    """
+end
+fooTheLambda()
+
+# 217
+T217 = Cdouble; arg217 = 1;
+icxx"std::vector<$T217>($arg217);";
+
+cxx"enum  X197:char {A197,B197};"
+@assert icxx"A197;" == 0
+
+# #232
+
+cxx"""
+struct PointXYZ232 {
+   PointXYZ232(int x, int y, int z) : x_(x), y_(y), z_(z) {}
+int x_,y_,z_;
+};
+""";
+v232 = icxx"std::vector<PointXYZ232>();";
+icxx"""$v232.push_back(PointXYZ232(0,0,0));""";
+@assert typeof(icxx"$v232[0];") <: Cxx.CppRef
+
+# #243
+counter243 = 0
+let body243 = i->(@assert 1 == unsafe_load(i); global counter243; counter243 += 1; nothing)
+    icxx"int x = 1; $body243(x);"
+    icxx"int x = 1; $body243(&x);"
+end
+@assert counter243 == 2
+cxx"""
+struct foo243 {
+    int x;
+};
+"""
+let body243b = i->(@assert 1 == icxx"$i->x;"; global counter243; counter243 += 1; nothing)
+    icxx"foo243 x{1}; $body243b(&x);"
+end
+@assert counter243 == 3
+
+# #246
+cxx"""
+template <int i> class Template246 {
+public:
+    int getI() { return i; }
+};
+"""
+@assert icxx"Template246<$(Val{5})>().getI();" == 5
+@assert icxx"Template246<$(Val{5}())>().getI();" == 5

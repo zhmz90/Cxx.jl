@@ -2,23 +2,23 @@ using Cxx
 cxx"""
 #include <iostream>
 """
-function foo()
+function ifoo()
     for i = 1:10
         icxx"""
             std::cout << "foo\n";
         """
     end
 end
-foo()
+ifoo()
 
-function bar()
+function ibar()
     for i = 1:10
         icxx"""
            std::cout << $i << "\n";
         """
    end
 end
-bar()
+ibar()
 
 function baz()
     for i = 1:10
@@ -47,9 +47,9 @@ function inlineexpr()
     icxx"""
         for (int i = 0; i < 10; ++i) {
             if (i < 5)
-                $:(a[1] += 1);
+                $:(a[1] += 1; nothing);
             else
-                $:(b[1] += 1);
+                $:(b[1] += 1; nothing);
         }
     """
     @assert a[1] == 5
@@ -76,5 +76,5 @@ Base.getindex(x::cxxt"std::vector<uint64_t>",i) = icxx"auto x = $ints.at($i); re
 @assert length(ints) == 10
 Cxx.@list cxxt"std::vector<uint64_t>"
 for (i, x) in enumerate(ints)
-    @assert 10*(i-1) < x <= 10*i
+    @assert 10*(i-1) < convert(UInt64,x) <= 10*i
 end

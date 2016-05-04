@@ -1,13 +1,13 @@
 ##Cxx.jl
 
-The Julia C++ Foreign Function Interface (FFI).
+The Julia C++ Foreign Function Interface (FFI) and REPL.
+
+![REPL Screenshot](doc/screenshot.png "C++ REPL Screenshot")
 
 
 ### Installation
 
-You will need to install Julia v0.4-dev with some special options.
-
-Cxx.jl requires "staged functions" amongst other things available only in v0.4. It also requires the development version of LLVM, which is currently targeting version 3.7.
+You will need to install Julia v0.5-dev with some special options.
 
 #### Build requirements
 
@@ -20,14 +20,19 @@ In addition to the [system requirements](https://github.com/JuliaLang/julia#requ
 
 Get the latest git checkout from https://github.com/JuliaLang/julia.git then add (or add to) a ```Make.user``` file at the top level with the following lines:
 ```sh
-override LLDB_VER=master
-override LLVM_VER=svn
-override LLVM_ASSERTIONS=1
+#GCC >= 5 will not work
+#override USECLANG=1
 override BUILD_LLVM_CLANG=1
-override BUILD_LLDB=1
 override USE_LLVM_SHLIB=1
-override LLDB_DISABLE_PYTHON=1
+# Optional, but recommended
+override LLVM_ASSERTIONS=1
+# For LLDB support also
+# override BUILD_LLDB=1
+# override LLDB_DISABLE_PYTHON=1
 ```
+
+If you're feeling adventure adventurous, you may also use `LLVM_VER=svn` instead, directly pulls in the latest LLVM version.
+This configuration may have more features (and is the development version), but may break unexpectedly if upstream makes changes.
 
 Then build simply with `make`. 
 
@@ -52,7 +57,7 @@ The main interface provided by Cxx.jl is the @cxx macro. It supports two main us
   - Membercall (where m is a CppPtr, CppRef or CppValue)
       @cxx m->foo(args...)
       
-To embedd C++ functions in Julia, there are two main approaches:
+To embed C++ functions in Julia, there are two main approaches:
 
 ```julia 
 # Using @cxx (e.g.):   
@@ -167,14 +172,14 @@ julia> cxx"""
        """
 # Access enum
 julia> @cxx Klassy::Bar
-CppEnum{symbol("Klassy::Foo")}(0)
+CppEnum{Symbol("Klassy::Foo")}(0)
 
 # Pass enum as an argument
 julia> @cxx Klassy::exec(@cxx(Klassy::Baz))
-CppEnum{symbol("Klassy::Foo")}(1)
+CppEnum{Symbol("Klassy::Foo")}(1)
 ```
 #### Example 7: C++ Hello World class
-```
+```julia
 julia> using Cxx
 julia> cxx"""#include <iostream>
        class Hello

@@ -1,11 +1,20 @@
-JULIAHOME = $(subst \,/,$(JULIA_HOME))/../..
+JULIAHOME := $(subst \,/,$(BASE_JULIA_HOME))/../..
 include $(JULIAHOME)/deps/Versions.make
 include $(JULIAHOME)/Make.inc
 
-FLAGS = -std=c++11 $(CPPFLAGS) $(CFLAGS) -I$(build_includedir) \
+CXXJL_CPPFLAGS = -I$(build_includedir) \
 		-I$(JULIAHOME)/src/support \
 		-I$(call exec,$(LLVM_CONFIG) --includedir) \
+		-I$(JULIAHOME)/deps/srccache/llvm-$(LLVM_VER)/tools/clang/lib \
 		-I$(JULIAHOME)/deps/llvm-$(LLVM_VER)/tools/clang/lib
+
+FLAGS = -std=c++11 $(CPPFLAGS) $(CFLAGS) $(CXXJL_CPPFLAGS)
+
+ifneq ($(USEMSVC), 1)
+CPP_STDOUT := $(CPP) -P
+else
+CPP_STDOUT := $(CPP) -E
+endif
 
 JULIA_LDFLAGS = -L$(build_shlibdir) -L$(build_libdir)
 
@@ -35,9 +44,23 @@ LLDB_LIBS = -llldbBreakpoint -llldbCommands -llldbCore -llldbInitialization \
     -llldbPluginSystemRuntimeMacOSX \
     -llldbPluginUnwindAssemblyInstEmulation -llldbPluginUnwindAssemblyX86 -llldbTarget \
     -llldbPluginInstrumentationRuntimeAddressSanitizer -llldbPluginPlatformAndroid \
-    -llldbPluginRenderScriptRuntime -llldbPluginProcessUtility \
-    -llldbPluginScriptInterpreterNone \
+    -llldbPluginRenderScriptRuntime \
     $(call exec,$(LLVM_CONFIG) --system-libs)
+
+ifeq ($(LLVM_VER),svn)
+LLDB_LIBS += -llldbPluginProcessUtility \
+    -llldbPluginScriptInterpreterNone \
+    -llldbPluginObjCLanguage \
+    -llldbPluginCPlusPlusLanguage \
+    -llldbPluginObjCPlusPlusLanguage \
+    -llldbPluginExpressionParserClang \
+    -llldbPluginOSGo -llldbPluginLanguageRuntimeGo -llldbPluginGoLanguage \
+    -llldbPluginExpressionParserGo \
+    $(call exec,$(LLVM_CONFIG) --system-libs)
+else
+LLDB_LIBS += -llldbPluginUtility
+endif
+
 LLDB_LIBS += -llldbPluginABIMacOSX_arm -llldbPluginABIMacOSX_arm64 -llldbPluginABIMacOSX_i386
 ifeq ($(OS), Darwin)
 LLDB_LIBS += -F/System/Library/Frameworks -F/System/Library/PrivateFrameworks -framework DebugSymbols \
@@ -71,13 +94,25 @@ endif
 endif
 LDFLAGS += -l$(LLVM_LIB_NAME)
 
-all: usr/lib/libcxxffi.$(SHLIB_EXT) usr/lib/libcxxffi-debug.$(SHLIB_EXT)
+all: usr/lib/libcxxffi.$(SHLIB_EXT) usr/lib/libcxxffi-debug.$(SHLIB_EXT) clang_constants.jl
 
 usr/lib:
 	@mkdir -p $(CURDIR)/usr/lib/
 
 build:
 	@mkdir -p $(CURDIR)/build
+
+LLVM_EXTRA_CPPFLAGS = 
+ifneq ($(LLVM_ASSERTIONS),1)
+LLVM_EXTRA_CPPFLAGS += -DLLVM_NDEBUG
+endif
+
+ifneq ($(BUILD_LLVM_CLANG),1)
+$(error Cxx.jl requires Clang to be built with julia - Set BUILD_LLVM_CLANG in Make.user)
+endif
+ifneq ($(USE_LLVM_SHLIB),1)
+$(error Cxx.jl currently requires LLVM to be built as a shared library - Set USE_LLVM_SHLIB in Make.user)
+endif
 
 build/bootstrap.o: ../src/bootstrap.cpp BuildBootstrap.Makefile | build
 	@$(call PRINT_CC, $(CXX) -fno-rtti -DLIBRARY_EXPORTS -fPIC -O0 -g $(FLAGS) -c ../src/bootstrap.cpp -o $@)
@@ -110,3 +145,6 @@ usr/lib/libcxxffi-debug.$(SHLIB_EXT):
 	@echo $(build_libdir)/libjulia-debug.$(SHLIB_EXT)
 	@echo "has been built."
 endif
+
+clang_constants.jl: ../src/cenumvals.jl.h usr/lib/libcxxffi.$(SHLIB_EXT)
+	@$(call PRINT_PERL, $(CPP_STDOUT) $(CXXJL_CPPFLAGS) -DJULIA ../src/cenumvals.jl.h > $@)

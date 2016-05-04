@@ -48,7 +48,7 @@ module CxxREPL
 
     # Load Clang Headers
 
-    addHeaderDir(joinpath(JULIA_HOME,"../include"))
+    addHeaderDir(joinpath(BASE_JULIA_HOME,"../include"))
 
     cxx"""
     #define __STDC_LIMIT_MACROS
@@ -69,9 +69,10 @@ module CxxREPL
     """
 
     function isPPDirective(C,data)
+        @assert data[end] == '\0'
         icxx"""
             const char *BufferStart = $(pointer(data));
-            const char *BufferEnd = BufferStart+$(endof(data));
+            const char *BufferEnd = BufferStart+$(endof(data))-1;
             clang::Lexer L(clang::SourceLocation(),$(Cxx.compiler(C))->getLangOpts(),
                 BufferStart, BufferStart, BufferEnd);
             clang::Token Tok;
@@ -81,13 +82,17 @@ module CxxREPL
     end
 
     function isTopLevelExpression(C,data)
+        @assert data[end] == '\0'
+        if contains(data,":=")
+            return false
+        end
         x = [Cxx.instance(C)]
         return isPPDirective(C,data) || icxx"""
             clang::Parser *P = $(Cxx.parser(C));
             clang::Preprocessor *PP = &P->getPreprocessor();
             clang::Parser::TentativeParsingAction TA(*P);
             EnterSourceFile((CxxInstance*)$(convert(Ptr{Void},pointer(x))),
-                $(pointer(data)),$(sizeof(data)));
+                $(pointer(data)),$(sizeof(data))-1);
             clang::PreprocessorLexer *L = PP->getCurrentLexer();
             P->ConsumeToken();
             bool result = P->getCurToken().is(clang::tok::kw_template) ||
@@ -95,7 +100,7 @@ module CxxREPL
             TA.Revert();
             // Consume all cached tokens, so we don't accidentally
             // Lex them later after we abort this buffer
-            while (PP->InCachingLexMode())
+            while (PP->InCachingLexMode() || PP->getCurrentLexer() == nullptr)
             {
                 clang::Token Tok;
                 PP->Lex(Tok);
@@ -109,9 +114,10 @@ module CxxREPL
 
     # Inspired by cling's InputValidator.cpp
     function isExpressionComplete(C,data)
+        @assert data[end] == '\0'
         icxx"""
             const char *BufferStart = $(pointer(data));
-            const char *BufferEnd = BufferStart+$(endof(data));
+            const char *BufferEnd = BufferStart+$(endof(data))-1;
             clang::Lexer L(clang::SourceLocation(),$(Cxx.compiler(C))->getLangOpts(),
                 BufferStart, BufferStart, BufferEnd);
             clang::Token Tok;
@@ -144,8 +150,25 @@ module CxxREPL
 
     function createDefaultDone(C)
         function(line)
-            Cxx.process_cxx_string(string(line,"\n;"), isTopLevelExpression(C,line), false, :REPL, 1, 1;
+            isToplevel = isTopLevelExpression(C,"$line\0")
+            isAssignment = false
+            if contains(line,":=")
+                parts = split(line,":=")
+                if length(parts) > 2
+                    error("Only one julia-assignment operator allowed per expression")
+                end
+                var, line = parts
+                var = Symbol(strip(var))
+                isAssignment = true
+            end
+            # Strip trailing semicolon (since we add one on the next line) to avoid unused result warning
+            line = line[end] == ';' ? line[1:end-1] : line
+            ret = Cxx.process_cxx_string(string(line,"\n;"), isToplevel, false, :REPL, 1, 1;
     compiler = C)
+            if isAssignment
+                ret = :($var = $ret)
+            end
+            ret
         end
     end
 
@@ -156,22 +179,23 @@ module CxxREPL
             # Copy colors from the prompt object
             prompt_prefix="\e[38;5;166m",
             prompt_suffix=Base.text_colors[:white],
-            on_enter = s->isExpressionComplete(C,bytestring(LineEdit.buffer(s))))
+            on_enter = s->isExpressionComplete(C,push!(copy(LineEdit.buffer(s).data),0)))
 
+        mirepl = isdefined(Base.active_repl,:mi) ? Base.active_repl.mi : Base.active_repl
         repl = Base.active_repl
 
         panel.on_done = REPL.respond(onDoneCreator(C),repl,panel)
 
-        main_mode = repl.interface.modes[1]
+        main_mode = mirepl.interface.modes[1]
 
-        push!(repl.interface.modes,panel)
+        push!(mirepl.interface.modes,panel)
 
         hp = main_mode.hist
         hp.mode_mapping[name] = panel
         panel.hist = hp
 
         const cxx_keymap = Dict{Any,Any}(
-            '<' => function (s,args...)
+            key => function (s,args...)
                 if isempty(s) || position(LineEdit.buffer(s)) == 0
                     buf = copy(LineEdit.buffer(s))
                     LineEdit.transition(s, panel) do

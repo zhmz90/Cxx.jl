@@ -5,6 +5,15 @@
 immutable QualType
     ptr::Ptr{Void}
 end
+Base.convert(::Type{Ptr{Void}}, QT::QualType) = QT.ptr
+
+# All types that are recgonized as builtins
+const CxxBuiltinTypes = Union{Type{Bool},
+    Type{UInt8},  Type{Int8},    Type{UInt16}, Type{Int16},
+    Type{Int32},  Type{UInt32},  Type{Int64},  Type{UInt64},
+    Type{Float32}, Type{Float64}}
+const CxxBuiltinTs = Union{Bool, UInt8, Int8, UInt16, Int16,
+    Int32, UInt32, Int64, UInt64, Float32, Float64}
 
 # # # Representing C++ values
 #
@@ -69,13 +78,6 @@ immutable CxxArrayType{T}
 end
 
 # The equivalent of a C++ on-stack value.
-# The representation of this is important and subject to change.
-# The current implementation is inefficient, because it puts the object on the
-# heap (ouch). A better implementation would use fixed-size arrays, ideally
-# coupled with the necessary escape analysis to be able to put it on the stack
-# in the common case. However, this will require (planned, but not yet
-# implemented) improvements in core Julia.
-#
 # T is a CppBaseType or a CppTemplate
 # See note on CVR above
 type CppValue{T,N}
@@ -86,25 +88,33 @@ end
 
 # The equivalent of a C++ reference
 # T can be any valid C++ type other than CppRef
-# See note on CVR above
-immutable CppRef{T,CVR}
-    ptr::Ptr{Void}
-end
+# See note on CVR above and note on bitstype below
+bitstype 8*sizeof(Ptr{Void}) CppRef{T,CVR}
+(::Type{CppRef{T,CVR}}){T,CVR}(p::Ptr{Void}) = reinterpret(CppRef{T,CVR}, p)
 
-cconvert(::Type{Ptr{Void}},p::CppRef) = p.ptr
+cconvert(::Type{Ptr{Void}},p::CppRef) = reinterpret(Ptr{Void}, p)
+Base.unsafe_load{T<:Union{CxxBuiltinTs,Ptr}}(p::CppRef{T}) = unsafe_load(reinterpret(Ptr{T}, p))
+Base.convert{T<:CxxBuiltinTs}(::Type{T},p::CppRef{T}) = unsafe_load(p)
 
 # The equivalent of a C++ pointer.
 # T can be a CppValue, CppPtr, etc. depending on the pointed to type,
 # but is never a CppBaseType or CppTemplate directly
 # TODO: Maybe use Ptr{CppValue} and Ptr{CppFunc} instead?
-immutable CppPtr{T,CVR}
-    ptr::Ptr{Void}
-end
+# immutable CppPtr{T,CVR}
+#    ptr::Ptr{Void}
+# end
+# Make CppPtr and Ptr the same in the julia calling convention
+bitstype 8*sizeof(Ptr{Void}) CppPtr{T,CVR}
+(::Type{CppPtr{T,CVR}}){T,CVR}(p::Ptr{Void}) = reinterpret(CppPtr{T,CVR}, p)
 
-cconvert(::Type{Ptr{Void}},p::CppPtr) = p.ptr
+cconvert(::Type{Ptr{Void}},p::CppPtr) = reinterpret(Ptr{Void}, p)
+Base.convert(::Type{Int},p::CppPtr) = convert(Int,reinterpret(Ptr{Void}, p))
+Base.convert(::Type{Ptr{Void}},p::CppPtr) = reinterpret(Ptr{Void}, p)
 
-==(p1::CppPtr,p2::Ptr) = p1.ptr == p2
-==(p1::Ptr,p2::CppPtr) = p1 == p2.ptr
+==(p1::CppPtr,p2::Ptr) = convert(Ptr{Void}, p1) == p2
+==(p1::Ptr,p2::CppPtr) = p1 == convert(Ptr{Void}, p2)
+
+Base.unsafe_load{T<:CppPtr}(p::CppRef{T}) = unsafe_load(reinterpret(Ptr{T}, p))
 
 # Provides a common type for CppFptr and CppMFptr
 immutable CppFunc{rt, argt}; end
@@ -121,13 +131,15 @@ immutable CppMFptr{base, fptr}
     adj::UInt64
 end
 
-# Represent a C/C++ Enum. `T` is a symbol, representing the fully qualified name
-# of the enum
-immutable CppEnum{T}
-    val::Int32
+# Represent a C/C++ Enum. `S` is a symbol, representing the fully qualified name
+# of the enum, `T` the underlying type
+immutable CppEnum{S, T}
+    val::T
 end
 ==(p1::CppEnum,p2::Integer) = p1.val == p2
 ==(p1::Integer,p2::CppEnum) = p1 == p2.val
+
+Base.unsafe_load{T<:CppEnum}(p::CppRef{T}) = unsafe_load(reinterpret(Ptr{Cint}, p))
 
 # Representa a C++ Lambda. Since they are not nameable, we need to number them
 # and record the corresponding type
@@ -153,7 +165,7 @@ typeForLambda{N}(::Type{CppLambda{N}}) = lambdaTypes[N]
 # etc.
 
 const NullCVR = (false,false,false)
-simpleCppType(s) = CppBaseType{symbol(s)}
+simpleCppType(s) = CppBaseType{Symbol(s)}
 simpleCppValue(s) = CxxQualType{simpleCppType(s),NullCVR}
 
 macro pcpp_str(s,args...)
@@ -174,3 +186,6 @@ end
 
 pcpp{T,N}(x::Type{CppValue{T,N}}) = CppPtr{T,NullCVR}
 pcpp{T}(x::Type{CppValue{T}}) = CppPtr{T,NullCVR}
+
+# Convert C++ QualType representation to julia representation
+Base.convert(::Type{QualType},T::vcpp"clang::QualType") = QualType(reinterpret(Ptr{UInt8}, T.data))

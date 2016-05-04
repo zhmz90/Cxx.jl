@@ -2,6 +2,7 @@ import Base: dump
 export @icxxdebug_str
 
 dump(d::pcpp"clang::Decl") = ccall((:cdump,libcxxffi),Void,(Ptr{Void},),d)
+dump(dc::pcpp"clang::DeclContext") = ccall((:dcdump,libcxxffi),Void,(Ptr{Void},),dc)
 dump(d::pcpp"clang::NamedDecl") = ccall((:cdump,libcxxffi),Void,(Ptr{Void},),d)
 dump(d::pcpp"clang::FunctionDecl") = ccall((:cdump,libcxxffi),Void,(Ptr{Void},),d)
 dump(d::pcpp"clang::TemplateDecl") = ccall((:cdump,libcxxffi),Void,(Ptr{Void},),d)
@@ -38,11 +39,37 @@ end
 
 macro icxxdebug_str(str,args...)
     compiler = :__current_compiler__
-    startvarnum, sourcebuf, exprs, isexprs = process_body(str, false, args...)
+    startvarnum, sourcebuf, exprs, isexprs = process_body(compiler, str, false, args...)
     if isempty(args)
-        args = (symbol(""),1,1)
+        args = (Symbol(""),1,1)
     end
     push!(sourcebuffers,(takebuf_string(sourcebuf),args...))
     id = length(sourcebuffers)
     esc(build_icxx_expr(id, exprs, isexprs, Any[], compiler, dumpast_impl))
+end
+
+function collectSymbolsForExport(RD::pcpp"clang::CXXRecordDecl")
+    f = Cxx.CreateFunctionWithPersonality(C, Cxx.julia_to_llvm(Void),[Cxx.julia_to_llvm(Ptr{Ptr{Void}})])
+    builder = irbuilder(C)
+    nummethods = icxx"""
+    auto *CGM = $(Cxx.instance(Cxx.__default_compiler__).CGM);
+    CGM->EmitTopLevelDecl($RD);
+    llvm::SmallVector<llvm::Constant *, 0> addresses;
+    unsigned i = 0;
+    for (auto method : $RD->methods()) {
+      clang::GlobalDecl GD(method);
+      auto name = CGM->getMangledName(GD);
+      auto llvmf = $(Cxx.instance(Cxx.__default_compiler__).shadow)->getFunction(name);
+      llvm::IRBuilder *builder = $builder;
+      builder->CreateStore(
+        builder->CreateBitCast(llvmf,$(Cxx.julia_to_llvm(Ptr{Void}))),
+        builder->CreateConstGEP2_32($(Cxx.julia_to_llvm(Ptr{Ptr{Void}})),
+        $f->getArgumentList()[0], 0, i++));
+      )
+    }
+    i
+    """
+    addresses = zeros(Ptr{Ptr{Void}},nummethods)
+    eval(:(llvmcall($(convert(Ptr{Void},f)),Void,(Ptr{Ptr{Void}},),$(pointer(addresses)))))
+    addresses
 end
